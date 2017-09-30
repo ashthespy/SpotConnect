@@ -28,16 +28,34 @@ audio_arg_parser.add_argument('--mixer', '-m', help='alsa mixer name for volume 
 audio_arg_parser.add_argument('--dbrange', '-r', help='alsa mixer volume range in Db', default=0)
 args = audio_arg_parser.parse_known_args()[0]
 
-# UDP Socket for metadata and helpers
-def info_metadata():
-    res = get_metadata()
-    res['volume']   = get_correctedVolume()
-    res['albumart'] = get_image_url(res['cover_uri'])
-    print (res)
-    return json.dumps(res)
+class Metadata:
+    def __init__(self):
+        self.meta = None
+        # Not known on init
+        self.minvol_range = 0
+        self.pos  = 0
+        self.set()
+
+    def set(self):
+        res = get_metadata()
+        res['volume']   = int(self.minvol_range +  \
+            ((lib.SpPlaybackGetVolume() / 655.35) * (100 - self.minvol_range) / 100))
+        res['albumart'] = get_image_url(res['cover_uri'])
+        res['seek']     = self.pos
+        self.meta = res
+
+    def set_pos(self,pos):
+        self.pos = pos
+
+    def set_minvol_range(self,minvol_range):
+        self.minvol_range = minvol_range
+
+    def json(self):
+        self.set()
+        return json.dumps(self.meta)
 
 class VolumioSocket:
-    def __init__(self,session, port=5000):
+    def __init__(self, session, metadata, port=5000):
         self._session = session
         self.socket = socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
         self._address = ('',port) # On localhost
@@ -58,7 +76,7 @@ class VolumioSocket:
         self.sendmsg("kSpPlaybackNotifyBecameInactive")
 
     def onDeviceActive(self):
-        self.sendmsg("kSpDeviveActive",self._session.is_active())
+        self.sendmsg("kSpDeviveActive", self._session.is_active())
         self.sendMeta()
 
     def onDeviceInactive(self):
@@ -69,7 +87,7 @@ class VolumioSocket:
 
     def sendMeta(self):
         if self._session.is_active():
-            self.sendmsg(info_metadata())
+            self.sendmsg(metadata.json())
 
     def sendmsg(self,msg, Sactive=True):
         if Sactive:
@@ -149,7 +167,8 @@ class AlsaSink:
 
 session = PlaybackSession()
 device = AlsaSink(session, args)
-VolSoc = VolumioSocket(session)
+metadata = Metadata()
+VolSoc = VolumioSocket(session,metadata)
 mixer_card_arg = {}
 if args.mixer_device_index:
     mixer_card_arg['cardindex'] = args.mixer_device_index
@@ -170,11 +189,8 @@ if selected_volume_range > volume_range or selected_volume_range == 0:
     selected_volume_range = volume_range
 min_volume_range = (1 - selected_volume_range / volume_range) * 100
 print "min_volume_range: {}".format(min_volume_range)
+metadata.set_minvol_range(min_volume_range)
 
-def get_correctedVolume(min_vol_range =min_volume_range):
-    volume = lib.SpPlaybackGetVolume()
-    correctedVol = int(min_volume_range + ((volume / 655.35) * (100 - min_volume_range) / 100))
-    return correctedVol
 
 def userdata_wrapper(f):
     def inner(*args):
@@ -306,6 +322,8 @@ def playback_data(self, data, num_samples, format, pending):
 @userdata_wrapper
 def playback_seek(self, millis):
     print "playback_seek: {}".format(millis)
+    # metadata.set_pos(millis)
+    # VolSoc.sendMeta()
 
 @ffi.callback('void(uint16_t volume, void *userdata)')
 @userdata_wrapper
@@ -322,6 +340,7 @@ def playback_volume(self, volume):
         corected_playback_volume = int(min_volume_range + ((volume / 655.35) * (100 - min_volume_range) / 100))
         print "corected_playback_volume: {}".format(corected_playback_volume)
         mixer.setvolume(corected_playback_volume)
+        # VolSoc.sendMeta()
 
 connection_callbacks = ffi.new('SpConnectionCallbacks *', [
     connection_notify,
